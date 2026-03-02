@@ -1,15 +1,15 @@
 from fastapi import FastAPI
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import swisseph as swe
 from openai import OpenAI
 
 app = FastAPI()
 
-# --- Swiss Ephemeris setup ---
+# Swiss Ephemeris setup
 swe.set_ephe_path(".")
 
-# --- OpenAI client ---
+# OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
@@ -21,15 +21,44 @@ def root():
 @app.post("/transit-analysis")
 def transit_analysis(data: dict):
 
-    # --- Natal Julian Date ---
+    # ==========================
+    # 1. EXTRACT BIRTH DATA
+    # ==========================
+    year = data["year"]
+    month = data["month"]
+    day = data["day"]
+    hour = data["hour"]
+    minute = data["minute"]
+    timezone_offset = data["timezone_offset"]
+    latitude = data["latitude"]
+    longitude = data["longitude"]
+
+    # ==========================
+    # 2. CONVERT LOCAL TIME → UTC
+    # ==========================
+    local_decimal_hour = hour + (minute / 60.0)
+    utc_decimal_hour = local_decimal_hour - timezone_offset
+
+    birth_datetime = datetime(year, month, day) + timedelta(hours=utc_decimal_hour)
+
+    utc_year = birth_datetime.year
+    utc_month = birth_datetime.month
+    utc_day = birth_datetime.day
+    utc_hour = birth_datetime.hour + (birth_datetime.minute / 60.0)
+
+    # ==========================
+    # 3. JULIAN DATE
+    # ==========================
     natal_jd = swe.julday(
-        data["year"],
-        data["month"],
-        data["day"],
-        data["hour"]
+        utc_year,
+        utc_month,
+        utc_day,
+        utc_hour
     )
 
-    # --- Current Transit Julian Date ---
+    # ==========================
+    # 4. CURRENT TRANSIT JD
+    # ==========================
     now = datetime.utcnow()
     transit_jd = swe.julday(
         now.year,
@@ -38,6 +67,9 @@ def transit_analysis(data: dict):
         now.hour + now.minute / 60.0
     )
 
+    # ==========================
+    # 5. PLANETARY POSITIONS
+    # ==========================
     planets = {
         "Sun": swe.SUN,
         "Moon": swe.MOON,
@@ -51,77 +83,89 @@ def transit_analysis(data: dict):
         "Pluto": swe.PLUTO
     }
 
+    natal_positions = {}
+    transit_positions = {}
+
+    for name, code in planets.items():
+        natal_positions[name] = swe.calc_ut(natal_jd, code)[0][0]
+        transit_positions[name] = swe.calc_ut(transit_jd, code)[0][0]
+
+    # ==========================
+    # 6. HOUSE CALCULATION
+    # ==========================
+    houses, ascmc = swe.houses(natal_jd, latitude, longitude)
+
+    # ==========================
+    # 7. ASPECT DETECTION
+    # ==========================
     aspects = []
     energy_score = 0
 
-    for t_name, t_planet in planets.items():
-        t_pos = swe.calc_ut(transit_jd, t_planet)[0][0]
+    for t_name, t_degree in transit_positions.items():
+        for n_name, n_degree in natal_positions.items():
 
-        for n_name, n_planet in planets.items():
-            n_pos = swe.calc_ut(natal_jd, n_planet)[0][0]
-
-            diff = abs(t_pos - n_pos)
-            if diff > 180:
-                diff = 360 - diff
+            difference = abs(t_degree - n_degree)
+            if difference > 180:
+                difference = 360 - difference
 
             aspect_type = None
             intensity = 0
 
-            # Conjunction
-            if abs(diff - 0) <= 6:
+            if abs(difference - 0) <= 6:
                 aspect_type = "Conjunction"
-                intensity = 1 - (abs(diff - 0) / 6)
+                intensity = 1 - (abs(difference - 0) / 6)
 
-            # Opposition
-            elif abs(diff - 180) <= 6:
-                aspect_type = "Opposition"
-                intensity = 1 - (abs(diff - 180) / 6)
-
-            # Square
-            elif abs(diff - 90) <= 6:
+            elif abs(difference - 90) <= 6:
                 aspect_type = "Square"
-                intensity = 1 - (abs(diff - 90) / 6)
+                intensity = 1 - (abs(difference - 90) / 6)
 
-            # Trine
-            elif abs(diff - 120) <= 6:
+            elif abs(difference - 120) <= 6:
                 aspect_type = "Trine"
-                intensity = 1 - (abs(diff - 120) / 6)
+                intensity = 1 - (abs(difference - 120) / 6)
+
+            elif abs(difference - 180) <= 6:
+                aspect_type = "Opposition"
+                intensity = 1 - (abs(difference - 180) / 6)
 
             if aspect_type:
+
                 category = "Challenging" if aspect_type in ["Square", "Opposition"] else "Supportive"
-                energy_score += intensity if category == "Supportive" else -intensity
+
+                if category == "Supportive":
+                    energy_score += intensity
+                else:
+                    energy_score -= intensity
 
                 aspects.append({
                     "transit_planet": t_name,
                     "natal_planet": n_name,
                     "aspect": aspect_type,
-                    "orb": round(diff, 2),
+                    "orb": round(difference, 2),
                     "intensity_percent": round(intensity * 100, 1),
                     "category": category
                 })
 
     if not aspects:
         return {
-            "energy_index": 0,
-            "overall_state": "Stable",
-            "strongest_aspect": None,
-            "active_aspects": []
+            "message": "No major aspects detected.",
+            "energy_index": 0
         }
 
     strongest = max(aspects, key=lambda x: x["intensity_percent"])
 
-    # --- AI Interpretation ---
+    # ==========================
+    # 8. AI INTERPRETATION
+    # ==========================
     prompt = f"""
-    Based on this strongest transit aspect:
-    Transit planet: {strongest['transit_planet']}
-    Natal planet: {strongest['natal_planet']}
-    Aspect: {strongest['aspect']}
-    Intensity: {strongest['intensity_percent']}%
+    Natal Moon degree: {natal_positions["Moon"]}
+    Strongest Transit:
+    {strongest}
 
     Provide:
-    - A short psychological interpretation
+    - Psychological interpretation
     - Emotional tone
-    - Recommended grounding protocol
+    - Grounding strategy
+    - Energy conservation advice if needed
     """
 
     ai_response = client.chat.completions.create(
@@ -134,8 +178,8 @@ def transit_analysis(data: dict):
 
     return {
         "energy_index": round(energy_score * 10, 2),
-        "overall_state": "Emotionally Active / Growth Pressure" if energy_score < 0 else "Flow State / Expansion",
         "strongest_aspect": strongest,
         "ai_interpretation": interpretation,
-        "active_aspects": aspects
+        "natal_positions": natal_positions,
+        "house_cusps": houses
     }
