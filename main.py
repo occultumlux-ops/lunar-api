@@ -1,8 +1,16 @@
 from fastapi import FastAPI
 from datetime import datetime
-import swisseph as swe
+import pyswisseph as swe
+from openai import OpenAI
+import os
 
 app = FastAPI()
+
+# Swiss Ephemeris setup
+swe.set_ephe_path(".")
+
+# OpenAI client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 @app.get("/")
@@ -122,9 +130,35 @@ def transit_analysis(data: dict):
 
     strongest_aspect = max(aspects, key=lambda x: x["intensity_percent"]) if aspects else None
 
+    # -----------------------------
+    # AI INTERPRETATION LAYER
+    # -----------------------------
+
+    summary_prompt = f"""
+    Energy Index: {energy_index}
+    Overall State: {overall_state}
+    Strongest Aspect: {strongest_aspect}
+
+    Provide a psychologically intelligent daily transit interpretation.
+    Focus on emotional tone, nervous system regulation, decision-making strategy,
+    and grounded personal power. Avoid mystical language.
+    """
+
+    ai_response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are a psychologically intelligent astrology interpreter."},
+            {"role": "user", "content": summary_prompt}
+        ],
+        temperature=0.7
+    )
+
+    interpretation = ai_response.choices[0].message.content
+
     return {
         "energy_index": energy_index,
         "overall_state": overall_state,
         "strongest_aspect": strongest_aspect,
-        "active_aspects": aspects
+        "active_aspects": aspects,
+        "ai_interpretation": interpretation
     }
